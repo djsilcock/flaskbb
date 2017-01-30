@@ -19,7 +19,7 @@ from flask_debugtoolbar import DebugToolbarExtension
 from flask_redis import FlaskRedis
 from flask_migrate import Migrate
 from flask_themes2 import Themes
-from flask_plugins import PluginManager
+from flaskbb.plugins import FlaskBBPluginManager
 from flask_babelplus import Babel
 from flask_wtf.csrf import CSRFProtect
 from flask_limiter import Limiter
@@ -58,7 +58,7 @@ migrate = Migrate()
 themes = Themes()
 
 # PluginManager
-plugin_manager = PluginManager()
+plugin_manager = FlaskBBPluginManager()
 
 # Babel
 babel = Babel()

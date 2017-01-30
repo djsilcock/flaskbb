@@ -12,12 +12,13 @@ import contextlib
 
 import copy
 import os
+import pkgutil
 from flask import current_app
 from flask import g
 from flask_migrate import upgrade, downgrade, migrate
-from flask_plugins import Plugin
-from flaskbb.extensions import db, migrate as mig
-from flaskbb.management.models import SettingsGroup
+from flask_plugins import Plugin, PluginManager,PluginError
+
+__path__ = pkgutil.extend_path(__path__, 'flaskbb_plugins')
 
 
 @contextlib.contextmanager  # TODO: Add tests
@@ -28,7 +29,7 @@ def plugin_name_migrate(name):
     del g.plugin_name
 
 
-def db_for_plugin(plugin_name,sqla_instance=None):
+def db_for_plugin(plugin_name, sqla_instance=None):
     """Labels models as belonging to this plugin.
     sqla_instance is a valid Flask-SQLAlchemy instance, if None, then the default db is used
 
@@ -43,7 +44,9 @@ def db_for_plugin(plugin_name,sqla_instance=None):
             ...
 
         """
-    sqla_instance=sqla_instance or db
+    if sqla_instance is None:
+        from flaskbb.extensions import db
+        sqla_instance = db
     new_db = copy.copy(sqla_instance)
 
     def Table(*args, **kwargs):
@@ -55,7 +58,11 @@ def db_for_plugin(plugin_name,sqla_instance=None):
     return new_db
 
 
-@mig.configure
+def setup_callbacks():
+    from flaskbb.extensions import migrate
+    migrate.configure(config_migrate)
+
+
 def config_migrate(config):
     """Configuration callback for plugins environment"""
     plugins = current_app.extensions['plugin_manager'].all_plugins.values()
@@ -63,6 +70,55 @@ def config_migrate(config):
     if config.get_main_option('version_table') == 'plugins':
         config.set_main_option('version_locations', ' '.join(migration_dirs))
     return config
+
+
+class FlaskBBPluginManager(PluginManager):
+    def init_app(self, *args, **kwargs):
+        PluginManager.init_app(self, *args, **kwargs)
+        setup_callbacks()
+
+    def load_plugins(self):
+        """Find all possible plugins in the plugin folder."""
+
+        self._plugins = {}
+        self._all_plugins = {}
+        pluginmodules = [(name, imp.find_module(name, __path__).load_module(name))
+                         for imp, name, ispkg in pkgutil.iter_modules(__path__, __name__ + '.')]
+
+        for pkgname, pkg in pluginmodules:
+            try:
+                pkgutil.get_data(pkgname, 'DISABLED')
+                enabled = False
+            except IOError:
+                # Add the plugin to the available plugins if the plugin
+                # isn't disabled
+                enabled = True
+            try:
+                class_name = pkg.__plugin__
+
+                self._found_plugins[class_name] = \
+                    "{}".format(pkgname)
+
+            except AttributeError:
+                continue
+
+            try:
+                plugin_class = getattr(pkg, class_name)
+            except AttributeError:
+                raise PluginError(
+                    "Couldn't import {} Plugin. Please check if the "
+                    "__plugin__ variable is set correctly.".format(class_name)
+                )
+
+            plugin_path = os.path.split(pkgutil.get_loader(pkg).get_filename())[0]
+
+            plugin_instance = plugin_class(plugin_path)
+
+            if enabled:
+                self._plugins[plugin_instance.identifier] = plugin_instance
+
+            self._all_plugins[plugin_instance.identifier] = plugin_instance
+        return self._found_plugins
 
 
 class FlaskBBPlugin(Plugin):
@@ -73,11 +129,11 @@ class FlaskBBPlugin(Plugin):
 
     def resource_filename(self, *names):
         "Returns an absolute filename for a plugin resource."
-        if len(names)==1 and '/' in names[0]:
-            names=names[0].split('/')
-        fname= os.path.join(self.path, *names)
+        if len(names) == 1 and '/' in names[0]:
+            names = names[0].split('/')
+        fname = os.path.join(self.path, *names)
         if ' ' in fname and not '"' in fname and not "'" in fname:
-            fname='"%s"'%fname
+            fname = '"%s"' % fname
         return fname
 
     def get_migration_version_dir(self):
@@ -94,7 +150,8 @@ class FlaskBBPlugin(Plugin):
         """Rolls back database to a previous version of plugin models.
         Default behaviour is to remove models completely"""
         plugin_dir = current_app.extensions['plugin_manager'].plugin_folder
-        downgrade(directory=os.path.join(plugin_dir, '_migration_environment'), revision=self.settings_key + '@' + target)
+        downgrade(directory=os.path.join(plugin_dir, '_migration_environment'),
+                  revision=self.settings_key + '@' + target)
 
     def migrate(self):
         """Generates new migration files for a plugin and stores them in
@@ -120,6 +177,8 @@ class FlaskBBPlugin(Plugin):
     def uninstallable(self):
         """Is ``True`` if the Plugin can be uninstalled."""
         if self.installable:
+            from flaskbb.management.models import SettingsGroup
+
             group = SettingsGroup.query. \
                 filter_by(key=self.settings_key). \
                 first()
